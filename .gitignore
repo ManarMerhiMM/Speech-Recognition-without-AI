@@ -1,0 +1,20 @@
+# Ignore all audio files
+*.wav
+
+# Ignore virtual environments
+venv/
+.env/
+
+# Ignore Python cache files
+__pycache__/
+*.pyc
+*.pyo
+
+# Ignore system and editor files
+.DS_Store
+.vscode/
+.idea/
+
+# Ignore temporary or log files
+*.log
+*.tmp
