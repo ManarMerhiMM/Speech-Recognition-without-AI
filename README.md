@@ -1,8 +1,8 @@
-\# 🗣️ Speech Recognition Without AI (Cross-Correlation Based)
+## 🗣️ Speech Recognition Without AI (Cross-Correlation Based)
 
 
 
-This project implements a \*\*non-AI voice recognition system\*\* that identifies \*who\* is speaking and \*what phrase\* is said using \*\*signal cross-correlation\*\* — no neural networks or machine learning required.
+This project implements a **non-AI voice recognition system** that identifies *who* is speaking and *what phrase* is said using **signal cross-correlation** — no neural networks or machine learning required.
 
 
 
@@ -14,21 +14,17 @@ It compares a live-recorded voice clip with preprocessed audio samples and respo
 
 
 
-\## 🎯 Features
+## 🎯 Features
 
 
 
-\- 🎙️ Records short live audio (default 3 seconds)  
-
-\- 🧹 Preprocesses all dataset WAVs (normalization + noise gating)  
-
-\- ⚖️ Matches audio by \*\*normalized cross-correlation\*\*  
-
-\- 🧍 Identifies both \*\*speaker\*\* and \*\*phrase\*\*  
-
-\- 🕒 Displays \*\*total correlation time\*\* and best match file name  
-
-\- 🗣️ Responds with \*\*text-to-speech\*\* feedback  
+- 🎙️ Records short live audio 
+- 🧹 Preprocesses all dataset WAVs (normalization + noise gating)  
+- ⚖️ Matches audio by **normalized cross-correlation**  
+- 🧍 Identifies both **speaker** and **phrase**  
+- 🕒 Displays **total correlation time** and best match file name  
+- 🗣️ Responds with **text-to-speech** based on the identified phrase
+- ⚠️ A threshold is set for identification in case no phrase/speaker matched the live recording  
 
 
 
@@ -36,7 +32,7 @@ It compares a live-recorded voice clip with preprocessed audio samples and respo
 
 
 
-\## 📂 Project Structure
+## 📂 Project Structure
 
 
 
@@ -56,7 +52,7 @@ Speech-Recognition-without-AI/
 
 │
 
-├── Preprocessed/ # Auto-generated cleaned WAVs (output)
+├── Preprocessed/ # Auto-generated cleaned WAVs
 
 │
 
@@ -64,9 +60,7 @@ Speech-Recognition-without-AI/
 
 ├── script.py # Main recognition logic
 
-├── requirements.txt # Dependencies
-
-└── README.md
+└── README.md # This file
 
 
 
@@ -74,7 +68,7 @@ Speech-Recognition-without-AI/
 
 
 
-\## ⚙️ Requirements
+## ⚙️ Requirements
 
 
 
@@ -85,11 +79,11 @@ pip install numpy sounddevice pyttsx3
 ```
 
 
-> Optional: use `ffmpeg` for audio format conversion if needed.
+> Optional: Add code to use `ffmpeg` for audio format conversion if needed.
 
 
 
-Also ensure you have a \*\*working microphone\*\* connected to your computer.
+Also ensure you have a **working microphone** connected to your computer.
 
 
 
@@ -97,7 +91,7 @@ Also ensure you have a \*\*working microphone\*\* connected to your computer.
 
 
 
-\## 🧩 Preparing the Dataset
+## 🧩 Preparing the Dataset
 
 
 
@@ -105,27 +99,31 @@ Also ensure you have a \*\*working microphone\*\* connected to your computer.
 
 &nbsp;  Each filename must follow this pattern:
 
-
-{SpeakerName} - {Phrase}.wav
-
+```bash
+{Person} - {Phrase}.wav
+```
 
 
 Examples:
-
+```bash
 Malek - Hello.wav
 
 Manar - How are you.wav
 
 Mohammad - Hello2.wav
-
+```
 
 
 > If a filename ends with a number (e.g., `Hello2.wav`), the system automatically ignores the numeric suffix when interpreting the phrase.
+> This is used to store multiple `.wav` files per phrase per person (more dataset variety and thus better recognition)
 
 
 
 2\. Run preprocessing:
+```bash
 python dataset\_processing.py
+```
+
 This cleans all `.wav` files and saves them to the `Preprocessed/` directory.
 
 
@@ -134,20 +132,20 @@ This cleans all `.wav` files and saves them to the `Preprocessed/` directory.
 
 
 
-\## ▶️ Running the Recognition System
+## ▶️ Running the Recognition System
 
 
 
 Once preprocessing is done:
 
-
+```bash
 python script.py
-
+```
 
 
 You’ll see output like this:
 
-
+```bash
 Listening for an audio phrase...
 
 Finished Listening, started processing...
@@ -159,10 +157,10 @@ Max correlation coefficient: 0.186
 Best match file: Mohammad - Hello2.wav
 
 Total correlation time: 47.12 s
+```
 
 
-
-The system will also \*\*speak the response aloud\*\*.
+The system will also **respond out loud**.
 
 
 
@@ -170,27 +168,20 @@ The system will also \*\*speak the response aloud\*\*.
 
 
 
-\## 🧠 How It Works
+## 🧠 How It Works
+
+### 🔊 Preprocessing
+- Converts all signals to mono, normalized amplitude  
+- Removes DC offset  
+- Applies a noise gate to eliminate low-level background noise  
+- Saves cleaned signals for faster matching
 
 
 
-\### 🔊 Preprocessing
+### ⚡ Matching
 
-\- Converts all signals to mono, normalized amplitude  
-
-\- Removes DC offset  
-
-\- Applies a noise gate to eliminate low-level background noise  
-
-\- Saves cleaned signals for faster matching
-
-
-
-\### ⚡ Matching
-
-\- Computes \*\*maximum normalized cross-correlation\*\* between the recorded signal and each reference sample.  
-
-\- Tracks:
+- Computes **maximum normalized cross-correlation** between the recorded signal and each reference sample.  
+- Tracks:
 
 &nbsp; - The speaker \& phrase with the highest match
 
@@ -200,9 +191,9 @@ The system will also \*\*speak the response aloud\*\*.
 
 
 
-\### 🗣️ Response
+### 🗣️ Response
 
-\- If correlation ≥ `SIMILARITY\_THRESHOLD`, a spoken and printed message is produced:
+- If correlation ≥ `SIMILARITY\_THRESHOLD`, a spoken and printed message is produced (currently we've only coded 2 responses but you can add as many as you want):
 
 &nbsp; - `"Hello"` → `"Hey! {speaker}"`
 
@@ -213,70 +204,10 @@ The system will also \*\*speak the response aloud\*\*.
 ---
 
 
+## 🚀 Future Enhancements
 
-\## 🔬 Example Output
-
-Listening for an audio phrase...
-
-Finished Listening, started processing...
-
-Response: I am fine thank you, Mohammad!
-
-Max correlation coefficient: 0.223
-
-Best match file: Mohammad - How are you3.wav
-
-Total correlation time: 39.8 s
-
-
-
----
-
-
-
-\## 🚀 Future Enhancements
-
-
-
-\- 📈 Add dynamic thresholding or confidence scaling  
-
-\- 🎧 Automatic silence trimming  
-
-\- 🧩 Integration with a lightweight GUI  
-
-\- 🌐 Add support for longer phrases or continuous recognition  
-
-
-
----
-
-
-
-\### 🏁 Author \& Contributors
-
-\- \*\*Project Lead:\*\* Mohammad  
-
-\- \*\*Collaborators:\*\* Manar, Malek, Oussama, Hadi  
-
-
-
----
-
-
-
-✅ The project is now fully functional and optimized for clear, fast cross-correlation–based voice recognition.
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+- 📈 Add dynamic thresholding or confidence scaling  
+- 🎧 Automatic silence trimming  
+- 🧩 Integration with a lightweight GUI  
+- 🌐 Add support for longer phrases or continuous recognition  
+- 🔊 Add .wav files for responses instead of simple TTS
