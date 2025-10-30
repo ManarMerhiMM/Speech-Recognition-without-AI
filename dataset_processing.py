@@ -72,3 +72,5 @@ for filename in os.listdir(DATA_DIR):
             print(f"  Failed to process {filename}: {e}")
 
 print(f"✅ Done. Processed files are saved in: {OUT_DIR}")
+
+# update: 2025-10-30T12:45:19.1254917+02:00
