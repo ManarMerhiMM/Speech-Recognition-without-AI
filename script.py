@@ -1,4 +1,6 @@
 import os
+import re
+import time
 import wave
 import numpy as np
 import sounddevice as sd
@@ -64,6 +66,7 @@ recorded_samples = sd.rec(int(DURATION * RATE), samplerate=RATE, channels=1, dty
 sd.wait()
 recorded_samples = recorded_samples.flatten()
 recorded_samples = preprocess_signal(recorded_samples)
+print("Finished Listening, started processing...")
 
 # --- Load and preprocess reference signals ---
 if not os.path.isdir(DATA_DIR):
@@ -75,23 +78,27 @@ for filename in os.listdir(DATA_DIR):
         try:
             speaker, phrase_with_ext = filename.split(" - ", 1)
             phrase = os.path.splitext(phrase_with_ext)[0]
+            # Strip trailing numbers (e.g., "Hello2" or "How are you 3" -> "Hello", "How are you")
+            phrase = re.sub(r'\s*\d+\s*$', '', phrase).strip()
         except ValueError:
             print(f"Skipping bad filename: {filename}")
             continue
         filepath = os.path.join(DATA_DIR, filename)
         samples = read_wav_as_float64(filepath, target_rate=RATE)
         samples = preprocess_signal(samples)
-        reference_signals.append((speaker, phrase, samples))
+        # keep filename so we can report which file matched best
+        reference_signals.append((speaker, phrase, samples, filename))
 
 if not reference_signals:
     print("No reference WAV files found. Please preprocess your dataset.")
-    exit(1)
+    raise SystemExit(1)
 
 # --- Match recorded audio to reference samples ---
-best_match = None
+best_match = None                 # (speaker, phrase, filename)
 best_score = -1.0
+corr_start = time.perf_counter()  # timing start
 
-for speaker, phrase, ref_signal in reference_signals:
+for speaker, phrase, ref_signal, ref_filename in reference_signals:
     if len(recorded_samples) >= len(ref_signal):
         long_sig, short_sig = recorded_samples, ref_signal
     else:
@@ -99,11 +106,13 @@ for speaker, phrase, ref_signal in reference_signals:
     score = znorm_xcorr_max(long_sig, short_sig)
     if score > best_score:
         best_score = score
-        best_match = (speaker, phrase)
+        best_match = (speaker, phrase, ref_filename)
+
+corr_elapsed = time.perf_counter() - corr_start  # timing end
 
 # --- Respond based on result ---
 if best_match is not None and best_score >= SIMILARITY_THRESHOLD:
-    identified_speaker, identified_phrase = best_match
+    identified_speaker, identified_phrase, matched_filename = best_match
     phrase_key = identified_phrase.strip().lower()
     if phrase_key == "hello":
         response_text = f"Hey! {identified_speaker}"
@@ -112,9 +121,14 @@ if best_match is not None and best_score >= SIMILARITY_THRESHOLD:
     else:
         response_text = f"You said: {identified_phrase}, {identified_speaker}."
 else:
+    identified_speaker = identified_phrase = matched_filename = None
     response_text = "Sorry, I didn't catch that."
 
 print("Response:", response_text)
+print(f"Max correlation coefficient: {best_score:.3f}")
+if matched_filename:
+    print(f"Best match file: {matched_filename}")
+print(f"Total correlation time: {corr_elapsed:.2f} s")
 
 # --- Speak the response ---
 engine = pyttsx3.init()
