@@ -80,9 +80,9 @@ Speech-Recognition-without-AI/
 
 Install dependencies using:
 
-
+```bash
 pip install numpy sounddevice pyttsx3
-
+```
 
 
 > Optional: use `ffmpeg` for audio format conversion if needed.

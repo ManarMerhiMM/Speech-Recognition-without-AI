@@ -1,8 +1,101 @@
-﻿# Exclude raw dataset (entire folder)
-Data/
-
-# Usual dev noise
-.venv/
+﻿# --- Python ---
 __pycache__/
-*.pyc
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+*.egg
+*.log
+
+# --- Virtual environments ---
+.env/
+.venv/
+env/
+venv/
+
+# --- VS Code / Visual Studio ---
+.vscode/
+.vs/
+*.sqlite
+ProjectSettings.json
+VSWorkspaceState.json
+
+# --- JetBrains / IntelliJ IDEA ---
 .idea/
+*.iml
+
+# --- Audio / Data files ---
+*.wav
+*.m4a
+*.mp3
+*.flac
+*.ogg
+
+# --- Jupyter / Notebooks ---
+.ipynb_checkpoints/
+
+# --- OS / Temporary files ---
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Build / Output ---
+build/
+dist/
+*.spec
+
+# --- Custom project folders ---
+# Ignore preprocessed / generated data
+Data/
+Preprocessed/
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+*.egg
+*.log
+
+# --- Virtual environments ---
+.env/
+.venv/
+env/
+venv/
+
+# --- VS Code / Visual Studio ---
+.vscode/
+.vs/
+*.sqlite
+ProjectSettings.json
+VSWorkspaceState.json
+
+# --- JetBrains / IntelliJ IDEA ---
+.idea/
+*.iml
+
+# --- Audio / Data files ---
+*.wav
+*.m4a
+*.mp3
+*.flac
+*.ogg
+
+# --- Jupyter / Notebooks ---
+.ipynb_checkpoints/
+
+# --- OS / Temporary files ---
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Build / Output ---
+build/
+dist/
+*.spec
+
+# --- Custom project folders ---
+# Ignore preprocessed / generated data
+Data/
+Preprocessed/
+
