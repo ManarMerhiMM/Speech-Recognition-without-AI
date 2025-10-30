@@ -1,10 +1,8 @@
-﻿# Ignore raw recordings
-Data/*.wav
-Data/*.m4a
-# (keep processed files)
-# Preprocessed/ is INCLUDED
-# IDE / env / cache
+﻿# Exclude raw dataset (entire folder)
+Data/
+
+# Usual dev noise
 .venv/
-.idea/
 __pycache__/
 *.pyc
+.idea/
