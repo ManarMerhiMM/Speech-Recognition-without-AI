@@ -191,7 +191,7 @@ The system will also **respond out loud**.
 
 
 
-### 🗣️ Response
+### 🗣️ Responses
 
 - If correlation ≥ `SIMILARITY\_THRESHOLD`, a spoken and printed message is produced (currently we've only coded 2 responses but you can add as many as you want):
 
@@ -202,6 +202,17 @@ The system will also **respond out loud**.
 
 
 ---
+
+### ☕ Adding More Responses
+To Add more Responses, simply add more `elif` statements to this part of the code `(lines 117-122)`:
+```python
+if phrase_key == "hello":
+    response_text = f"Hey! {identified_speaker}"
+elif phrase_key == "how are you":
+    response_text = f"I am fine thank you, {identified_speaker}!"
+else:
+    response_text = f"You said: {identified_phrase}, {identified_speaker}."
+``` 
 
 
 ## 🚀 Future Enhancements
