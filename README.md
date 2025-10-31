@@ -219,6 +219,5 @@ else:
 
 - 📈 Add dynamic thresholding or confidence scaling  
 - 🎧 Automatic silence trimming  
-- 🧩 Integration with a lightweight GUI  
 - 🌐 Add support for longer phrases or continuous recognition  
 - 🔊 Add .wav files for responses instead of simple TTS
