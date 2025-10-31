@@ -177,6 +177,41 @@ The system will also **respond out loud**.
 - Saves cleaned signals for faster matching
 
 
+🖥️ Graphical User Interface (GUI)
+
+The project features a Tkinter-based GUI that allows users to record speech, compare it with stored samples, and view results interactively.
+
+🎙 Record
+
+Click “Record” to capture audio using your microphone.
+
+The app displays progress messages like “Recording started…” and “Finished correlation (1.5 s)”.
+
+💬 Output of the User
+
+Shows the current status of recording and processing in real time.
+
+🤖 Answer
+
+Displays:
+
+Best Match: the detected speaker and phrase.
+
+Reply: a short text response based on the recognized phrase.
+
+🎧 Playback
+
+Best Match → Play: plays the closest-matching dataset sample.
+
+Recorded Signal → Play: replays your recorded voice for comparison.
+
+🎨 Design
+
+Clean dark theme built with Tkinter + ttk.
+
+Lightweight, responsive, and easy to run on any system.
+
+
 
 ### ⚡ Matching
 
