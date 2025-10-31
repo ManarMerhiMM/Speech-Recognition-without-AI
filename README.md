@@ -252,6 +252,7 @@ else:
     response_text = f"You said: {identified_phrase}, {identified_speaker}."
 ``` 
 
+#### A similar snippet can be found in `gui.py` for if you want to add more responses by the gui application
 
 ## 🚀 Future Enhancements
 
