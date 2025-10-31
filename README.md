@@ -62,6 +62,8 @@ Speech-Recognition-without-AI/
 
 ├── gui.py # Simple user interface
 
+├── record_latest.wav # latest recorded phrase by the GUI
+
 └── README.md # This file
 
 

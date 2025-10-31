@@ -1,204 +1,213 @@
+# gui.py — Tkinter GUI that mirrors script.py logic & outputs: loads cached refs (Preprocessed/ref_cache.npz),
+# records @ 8 kHz, FFT-based NCC matching, thresholded decision, and TTS reply. Displays the same fields
+# (Response, Max corr, Best match file, Recognized phrase (normalized), Total correlation time).
+# Update: buttons use pointer cursor. TTS is reliable: a NEW pyttsx3 engine is created/used per recording
+# inside the same worker thread (Windows/SAPI-safe), after ensuring the audio device is free).
+# Theme: Midnight Gold (dark, black/white with gold accents).
+
 import tkinter as tk
 from tkinter import ttk, messagebox
 import threading
-import os, glob, time, warnings
+import os, time, re
 
 import numpy as np
 import sounddevice as sd
-import scipy.io.wavfile as wav
-import scipy.signal as sps
-import pyttsx3  # text-to-speech
+from scipy.signal import fftconvolve
+from concurrent.futures import ThreadPoolExecutor
 
-# -------------------------------------------------------------------
-# SETTINGS
-# -------------------------------------------------------------------
-FS_RECORD = 44100          # microphone sample rate
-RECORD_SECONDS = 3         # seconds
-DATASET_DIR = "Data/"      # folder that contains your .wav files
-WORK_FS = 16000            # processing sample rate (downsample for speed)
-RECORD_FILE = "record_latest.wav"  # single file reused each recording
-SIMILARITY_THRESHOLD = 0.15
+# -----------------------------
+# Config (aligned with script.py)
+# -----------------------------
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+CACHE_PATH = os.path.join(SCRIPT_DIR, "Preprocessed", "ref_cache.npz")
+PREPROCESSED_DIR = os.path.join(SCRIPT_DIR, "Preprocessed")
 
-# -------------------------------------------------------------------
-# STATE
-# -------------------------------------------------------------------
+RATE = 8000                 # must match dataset_processing.py cache rate
+RECORD_SECONDS = 3.0        # seconds to record
+SIMILARITY_THRESHOLD = 0.12 # tune per dataset (e.g., 0.12–0.20)
+RECORD_FILE = os.path.join(SCRIPT_DIR, "record_latest.wav")
+
+# -----------------------------
+# State
+# -----------------------------
 recorded_data = None
 recorded_path = None
 best_match_path = None
 
-# TTS engine (initialized once)
-_tts_engine = pyttsx3.init()
+# Cache (loaded once at startup)
+ref = None  # dict with keys: speakers, phrases, filenames, signals, rate
 
-def speak_async(text: str):
-    """Speak text in a background thread so the UI remains responsive."""
-    def _run():
-        try:
-            _tts_engine.stop()
-            _tts_engine.say(text)
-            _tts_engine.runAndWait()
-        except Exception as e:
-            print("TTS error:", e)
-    threading.Thread(target=_run, daemon=True).start()
-
-# -------------------------------------------------------------------
-# AUDIO UTILS
-# -------------------------------------------------------------------
-def _to_mono_float(x):
-    """Ensure 1D float32 array in [-1,1] range."""
-    x = np.asarray(x)
-    if x.ndim > 1:
-        x = x[:, 0]
-    # convert to float32 if int
-    if np.issubdtype(x.dtype, np.integer):
-        x = x.astype(np.float32) / np.iinfo(x.dtype).max
-    else:
-        x = x.astype(np.float32)
-    return x
-
-def _resample(sig, fs_from, fs_to):
-    """Resample using polyphase for quality & speed."""
-    if fs_from == fs_to:
-        return sig
-    g = np.gcd(int(fs_from), int(fs_to))
-    up = fs_to // g
-    down = fs_from // g
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        return sps.resample_poly(sig, up, down).astype(np.float32)
-
-def _safe_play(wave_, fs):
-    try:
-        sd.stop()
-        sd.play(wave_, fs)
-    except Exception as e:
-        messagebox.showerror("Audio Error", str(e))
-
-def _load_wav(path, target_fs=None):
-    """Read wav -> mono float32, optionally resampled to target_fs."""
-    rate, data = wav.read(path)
-    data = _to_mono_float(data)
-    if target_fs is not None:
-        data = _resample(data, rate, target_fs)
-        rate = target_fs
-    return rate, data
-
-# -------------------------------------------------------------------
-# MATCHING LOGIC
-# -------------------------------------------------------------------
-def normalized_xcorr(a, b):
-    """Max normalized cross-correlation between a and b."""
-    if len(a) == 0 or len(b) == 0:
-        return 0.0
-    a = a - np.mean(a)
-    b = b - np.mean(b)
-    na = np.linalg.norm(a)
-    nb = np.linalg.norm(b)
-    if na == 0 or nb == 0:
-        return 0.0
-    corr = sps.fftconvolve(a, b[::-1], mode="valid")  # slide b over a
-    denom = na * nb
-    corr = corr / denom
-    return float(np.max(corr))
-
-def trim_silence(x, thr=0.02, win=2048):
-    """Simple silence trimming by magnitude threshold."""
-    if len(x) == 0:
+# -----------------------------
+# Matching utils (identical logic to script.py)
+# -----------------------------
+def trim_silence(x: np.ndarray, thr: float = 0.02, win: int = 1024) -> np.ndarray:
+    if x.size == 0:
         return x
-    x = np.asarray(x, dtype=np.float32)
-    eps = 1e-8
-    sq = x**2
-    kernel = np.ones(win) / win
-    rms = np.sqrt(np.convolve(sq, kernel, mode="same") + eps)
+    x = x.astype(np.float32, copy=False)
+    sq = x * x
+    kernel = np.ones(win, dtype=np.float32) / win
+    rms = np.sqrt(np.convolve(sq, kernel, mode="same") + 1e-8)
     mask = rms > thr
     if not np.any(mask):
         return x
     idx = np.where(mask)[0]
-    start, end = int(idx[0]), int(idx[-1]) + 1
-    return x[start:end]
+    return x[idx[0]: idx[-1] + 1]
 
-def find_best_match(record_path):
-    """
-    Compare the recorded wav with every .wav in DATASET_DIR.
-    Returns (best_path, best_score, person, file_name).
-    """
-    _, rec = _load_wav(record_path, target_fs=WORK_FS)
-    rec = trim_silence(rec)
+def preprocess_signal(sig: np.ndarray) -> np.ndarray:
+    if sig.size == 0:
+        return sig
+    sig = sig - np.mean(sig)
+    m = np.max(np.abs(sig)) + 1e-12
+    sig = (sig / m).astype(np.float32)
+    return trim_silence(sig, thr=0.02, win=1024)
 
-    best_score, best_path = -1.0, None
-    for path in glob.glob(os.path.join(DATASET_DIR, "*.wav")):
-        try:
-            _, ref = _load_wav(path, target_fs=WORK_FS)
-            ref = trim_silence(ref)
-            a, b = (rec, ref) if len(rec) >= len(ref) else (ref, rec)
-            score = normalized_xcorr(a, b)
-            if score > best_score:
-                best_score = score
-                best_path = path
-        except Exception as e:
-            print(f"Skipping {path}: {e}")
+def ncc_fft_max(long_sig: np.ndarray, short_sig: np.ndarray) -> float:
+    L = len(short_sig)
+    if L == 0 or len(long_sig) < L:
+        return 0.0
+    corr = fftconvolve(long_sig, short_sig[::-1], mode="valid")
+    ss = np.sum(short_sig * short_sig, dtype=np.float64)
+    if ss <= 0.0:
+        return 0.0
+    short_norm = np.sqrt(ss)
+    lsq = long_sig * long_sig
+    csum = np.cumsum(lsq, dtype=np.float64)
+    win_energy = csum[L-1:] - np.concatenate(([0.0], csum[:-L]))
+    denom = short_norm * np.sqrt(np.maximum(win_energy, 1e-12))
+    coeff = corr / denom
+    if coeff.size == 0:
+        return 0.0
+    return float(np.max(coeff))
 
-    person = "Unknown"
-    file_name = os.path.basename(best_path) if best_path else "—"
-    if " - " in file_name:
-        person = file_name.split(" - ")[0]
+def score_one(args) -> float:
+    rec_sig, ref_sig = args
+    if len(rec_sig) >= len(ref_sig):
+        long_sig, short_sig = rec_sig, ref_sig
+    else:
+        long_sig, short_sig = ref_sig, rec_sig
+    return ncc_fft_max(long_sig, short_sig)
 
-    return best_path, best_score, person, file_name
+def normalize_phrase(phrase_raw: str) -> str:
+    return re.sub(r"\s*\d+\s*$", "", str(phrase_raw)).strip()
 
-# -------------------------------------------------------------------
-# BUTTON ACTIONS
-# -------------------------------------------------------------------
+def build_response(speaker: str | None, phrase_raw: str | None) -> str:
+    if not speaker or not phrase_raw:
+        return "Sorry, I didn't catch that."
+    phrase_key = normalize_phrase(phrase_raw).lower()
+    if phrase_key == "hello":
+        return f"Hey! {speaker}"
+    if phrase_key == "how are you":
+        return f"I am fine thank you, {speaker}!"
+    return f"You said: {normalize_phrase(phrase_raw)}, {speaker}."
+
+def load_cache(path: str):
+    if not os.path.isfile(path):
+        raise FileNotFoundError(
+            f"Cache not found: {path}\nRun: python dataset_processing.py\n"
+            "This generates Preprocessed/ref_cache.npz"
+        )
+    z = np.load(path, allow_pickle=True)
+    data = {
+        "speakers": z["speakers"],
+        "phrases": z["phrases"],
+        "filenames": z["filenames"],
+        "signals": z["signals"],
+        "rate": int(z["rate"]),
+    }
+    return data
+
+# -----------------------------
+# Button actions
+# -----------------------------
 def start_recording():
     record_btn.config(state="disabled")
-    status_var.set("Recording started...")
-    threading.Thread(target=_record_flow, daemon=True).start()
+    status_var.set("Listening for an audio phrase...")
+    threading.Thread(target=_record_and_match_flow, daemon=True).start()
 
-def _record_flow():
+def _record_and_match_flow():
     global recorded_data, recorded_path, best_match_path
     try:
-        frames = int(RECORD_SECONDS * FS_RECORD)
-        audio = sd.rec(frames, samplerate=FS_RECORD, channels=1, dtype="float32")
+        # Record
+        rec = sd.rec(int(RECORD_SECONDS * RATE), samplerate=RATE, channels=1, dtype="float32")
         sd.wait()
-        recorded_data = audio.squeeze()
+        recorded_data = rec.flatten()
+        recorded_data = preprocess_signal(recorded_data)
 
-        status_var.set("Finished recording.")
-        recorded_path = os.path.abspath(RECORD_FILE)  # overwrite one file every time
-        wav.write(recorded_path, FS_RECORD, recorded_data.astype(np.float32))
+        # Save last recording (processed) for relistening
+        try:
+            import wave
+            sig16 = np.clip(recorded_data, -1.0, 1.0)
+            sig16 = (sig16 * 32767.0).astype(np.int16)
+            with wave.open(RECORD_FILE, "wb") as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(RATE)
+                wf.writeframes(sig16.tobytes())
+            recorded_path = RECORD_FILE
+        except Exception:
+            recorded_path = None
 
-        status_var.set("Started correlation...")
-        t0 = time.time()
-        best_match_path, best_score, person, fname = find_best_match(recorded_path)
-        dt = time.time() - t0
-        status_var.set(f"Finished correlation ({dt:.2f} s)")  # 2 decimals like script.py
+        status_var.set("Finished Listening, started processing...")
 
-        reply_text = ""
-        if best_match_path is None or best_score < SIMILARITY_THRESHOLD:
-            best_match_var.set("Best Match: (none found)")
+        # Score in parallel (threads avoid Windows spawn issues in GUI)
+        t0 = time.perf_counter()
+        with ThreadPoolExecutor(max_workers=os.cpu_count() or 8) as ex:
+            scores = list(ex.map(score_one, ((recorded_data, s) for s in ref["signals"]), chunksize=32))
+        best_idx = int(np.argmax(scores)) if scores else -1
+        best_score = scores[best_idx] if best_idx >= 0 else -1.0
+        elapsed = time.perf_counter() - t0
+
+        # Decide match
+        if best_idx >= 0 and best_score >= SIMILARITY_THRESHOLD:
+            spk = str(ref["speakers"][best_idx])
+            phr_raw = str(ref["phrases"][best_idx])
+            phr = normalize_phrase(phr_raw)
+            fname = str(ref["filenames"][best_idx])
+            response = build_response(spk, phr)
+            # prefer preprocessed file for playback
+            ppath = os.path.join(PREPROCESSED_DIR, fname)
+            best_match_path = ppath if os.path.isfile(ppath) else None
         else:
-            best_match_var.set(f"Best Match: {person} – {fname} | corr = {best_score:.2f}")
+            spk = phr = fname = None
+            response = "Sorry, I didn't catch that."
+            best_match_path = None
 
-            # -------- phrase-key reply logic (case-insensitive) --------
-            phrase_key = os.path.splitext(fname)[0].split(" - ")[-1].strip().lower()
-            identified_speaker = person
-            identified_phrase = phrase_key
+        # UI: mirror script.py outputs
+        status_var.set(f"Finished correlation ({elapsed:.2f} s)")
 
-            if phrase_key == "hello":
-                response_text = f"Hey! {identified_speaker}"
-            elif phrase_key == "how are you":
-                response_text = f"I am fine thank you, {identified_speaker}!"
-            else:
-                response_text = f"{identified_phrase}, {identified_speaker}."
-            reply_text = response_text
-            # -----------------------------------------------------------
+        if best_idx >= 0:
+            best_match_var.set(f"Best match file: {fname} | Max correlation coefficient: {best_score:.3f}")
+        else:
+            best_match_var.set("Best match file: — | Max correlation coefficient: 0.000")
 
-        # Update UI
-        reply_var.set(f"Reply: {reply_text}" if reply_text else "Reply: —")
+        if best_idx >= 0 and spk and phr:
+            reply_lines = [
+                f"Response: {response}",
+                f"Recognized phrase (normalized): {phr}"
+            ]
+        else:
+            reply_lines = [f"Response: {response}"]
+        reply_var.set("\n".join(reply_lines))
 
-        # Speak every time results appear (i.e., when we have a reply)
-        if reply_text:
-            speak_async(reply_text)
+        # --- RELIABLE TTS: speak here, in THIS worker thread, with a fresh engine ---
+        try:
+            sd.stop()  # ensure device isn't in use
+        except Exception:
+            pass
+        try:
+            import pyttsx3
+            tts = pyttsx3.init()
+            # Optional: tts.setProperty("rate", 180); tts.setProperty("volume", 1.0)
+            tts.say(response)
+            tts.runAndWait()
+            tts.stop()
+            del tts
+        except Exception as e:
+            print("TTS error:", e)
+        # ---------------------------------------------------------------------------
 
     except Exception as e:
-        messagebox.showerror("Recording Error", str(e))
+        messagebox.showerror("Error", str(e))
     finally:
         record_btn.config(state="normal")
 
@@ -206,83 +215,124 @@ def play_recorded():
     if recorded_data is None:
         messagebox.showinfo("Info", "No recording yet.")
         return
-    _safe_play(recorded_data, FS_RECORD)
+    try:
+        sd.stop()
+        sd.play(recorded_data, RATE)
+    except Exception as e:
+        messagebox.showerror("Audio Error", str(e))
 
 def play_best_match():
     if not best_match_path:
         messagebox.showinfo("Info", "No best match yet.")
         return
-    rate, data = _load_wav(best_match_path)  # play at original rate
-    _safe_play(data, rate)
+    try:
+        import wave
+        with wave.open(best_match_path, "rb") as wf:
+            fr = wf.getframerate()
+            n = wf.getnframes()
+            raw = wf.readframes(n)
+            ch = wf.getnchannels()
+        data = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+        if ch > 1:
+            data = data[::ch]
+        sd.stop()
+        sd.play(data, fr)
+    except Exception as e:
+        messagebox.showerror("Audio Error", str(e))
 
-# -------------------------------------------------------------------
-# THEME
-# -------------------------------------------------------------------
-BG = "#1e1e1e"
-FG = "#ffffff"
-SUB = "#dcdcdc"
-BTN_BG = "#3a3a3a"
-BTN_ACTIVE = "#0078d7"
-HEADER_BG = "#0078d7"
-HEADER_FG = "#ffffff"
+# -----------------------------
+# THEME — Midnight Gold (dark, black/white with gold accents)
+# -----------------------------
+BG = "#121212"        # app background (near-black)
+FG = "#FFFFFF"        # primary text
+SUB = "#C7C7C7"       # secondary text
+HEADER_BG = "#0F0F0F" # header background
+HEADER_FG = "#FFD54A" # header text (gold)
+BTN_BG = "#1E1E1E"    # button face
+BTN_ACTIVE = "#FFD54A" # accent (gold)
+BORDER = "#2A2A2A"    # card borders
+
 FONT_BASE = ("Segoe UI", 11)
-FONT_BOLD = ("Segoe UI", 11, "bold")
-FONT_TITLE = ("Segoe UI", 13, "bold")
+FONT_BOLD = ("Segoe UI Semibold", 11)
+FONT_TITLE = ("Segoe UI Semibold", 14)
 
-# -------------------------------------------------------------------
+# -----------------------------
 # UI
-# -------------------------------------------------------------------
+# -----------------------------
 root = tk.Tk()
 root.title("Speech-Recognition-Without-AI")
-root.geometry("580x580")
+root.geometry("640x620")
 root.resizable(False, False)
 root.configure(bg=BG)
 
 style = ttk.Style()
 style.theme_use("clam")
+
+# Labels
 style.configure("TLabel", background=BG, foreground=FG, font=FONT_BASE)
 style.configure("Secondary.TLabel", background=BG, foreground=SUB, font=FONT_BASE)
-style.configure("TButton", background=BTN_BG, foreground=FG, font=FONT_BASE, padding=6)
-style.map("TButton", background=[("active", BTN_ACTIVE)])
-style.configure("TLabelframe", background=BG, foreground=FG, font=FONT_BOLD)
-style.configure("TLabelframe.Label", background=BG, foreground=SUB, font=FONT_BOLD)
 
-header = tk.Frame(root, bg=HEADER_BG, height=44)
+# Buttons
+style.configure("TButton", background=BTN_BG, foreground=FG, font=FONT_BASE, padding=8, borderwidth=1)
+style.map("TButton",
+          background=[("active", "#2B2B2B"), ("pressed", "#373737")],
+          foreground=[("disabled", "#7A7A7A")])
+
+# Labeled frames as “cards”
+style.configure("Card.TLabelframe", background=BG, foreground=FG,
+                bordercolor=BORDER, relief="solid", borderwidth=1)
+style.configure("Card.TLabelframe.Label", background=BG, foreground=HEADER_FG, font=FONT_BOLD)
+
+# Header
+header = tk.Frame(root, bg=HEADER_BG, height=52, highlightthickness=0)
 header.pack(fill="x")
-tk.Label(header, text="Speech Recognition", bg=HEADER_BG, fg=HEADER_FG, font=FONT_TITLE).pack(pady=8)
+tk.Label(header, text="Speech Recognition Without AI", bg=HEADER_BG, fg=HEADER_FG, font=FONT_TITLE).pack(pady=10)
 
 container = tk.Frame(root, bg=BG)
 container.pack(fill="both", expand=True, padx=16, pady=16)
 
 record_btn = ttk.Button(container, text="🎙  Record", command=start_recording)
 record_btn.pack(pady=10)
+record_btn.configure(cursor="hand2")  # pointer cursor
 
-status_frame = ttk.LabelFrame(container, text="Output of the User")
+status_frame = ttk.LabelFrame(container, text="Output of the User", style="Card.TLabelframe")
 status_frame.pack(fill="x", pady=12)
-status_frame.configure(borderwidth=2)
+status_frame.configure(borderwidth=1)
 status_var = tk.StringVar(value="Waiting for input...")
-ttk.Label(status_frame, textvariable=status_var, wraplength=520).pack(padx=12, pady=10, anchor="w")
+ttk.Label(status_frame, textvariable=status_var, wraplength=580).pack(padx=12, pady=10, anchor="w")
 
-answer_frame = ttk.LabelFrame(container, text="Answer")
+answer_frame = ttk.LabelFrame(container, text="Answer", style="Card.TLabelframe")
 answer_frame.pack(fill="x", pady=12)
-answer_frame.configure(borderwidth=2)
-best_match_var = tk.StringVar(value="Best Match: —")
-reply_var = tk.StringVar(value="Reply: —")
-ttk.Label(answer_frame, textvariable=best_match_var, wraplength=520).pack(padx=12, pady=(10, 4), anchor="w")
-ttk.Label(answer_frame, textvariable=reply_var, wraplength=520, style="Secondary.TLabel").pack(padx=12, pady=(0, 10), anchor="w")
+answer_frame.configure(borderwidth=1)
+best_match_var = tk.StringVar(value="Best match file: — | Max correlation coefficient: 0.000")
+reply_var = tk.StringVar(value="Response: —")
+ttk.Label(answer_frame, textvariable=best_match_var, wraplength=580).pack(padx=12, pady=(10, 6), anchor="w")
+ttk.Label(answer_frame, textvariable=reply_var, wraplength=580, style="Secondary.TLabel", justify="left").pack(padx=12, pady=(0, 10), anchor="w")
 
 audio_block = tk.Frame(container, bg=BG)
 audio_block.pack(fill="x", pady=10)
 
 bm_row = tk.Frame(audio_block, bg=BG); bm_row.pack(fill="x", pady=6)
 ttk.Label(bm_row, text="Best Match").pack(side="left", padx=(0, 10))
-ttk.Button(bm_row, text="Play", command=play_best_match).pack(side="left")
+bm_play_btn = ttk.Button(bm_row, text="Play", command=play_best_match)
+bm_play_btn.pack(side="left")
+bm_play_btn.configure(cursor="hand2")
 
 rec_row = tk.Frame(audio_block, bg=BG); rec_row.pack(fill="x", pady=6)
 ttk.Label(rec_row, text="Recorded Signal").pack(side="left", padx=(0, 10))
-ttk.Button(rec_row, text="Play", command=play_recorded).pack(side="left")
+rec_play_btn = ttk.Button(rec_row, text="Play", command=play_recorded)
+rec_play_btn.pack(side="left")
+rec_play_btn.configure(cursor="hand2")
 
-
+# -----------------------------
+# Boot: load cache
+# -----------------------------
+try:
+    ref = load_cache(CACHE_PATH)
+    if ref["rate"] != RATE:
+        raise RuntimeError(f"Cache rate {ref['rate']} != recorder rate {RATE}. Re-run dataset_processing.py.")
+except Exception as e:
+    messagebox.showerror("Startup Error", str(e))
 
 if __name__ == "__main__":
     root.mainloop()

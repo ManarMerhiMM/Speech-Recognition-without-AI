@@ -1,137 +1,168 @@
+# script.py — Terminal matcher (fast): loads cached references, records at 8 kHz, FFT-based NCC, Windows-safe multiprocessing, and TTS reply.
+# Note: If a filename ends with digits (e.g., "Hello2"), the phrase is recognized without the numeric suffix.
+
 import os
 import re
+import sys
 import time
-import wave
 import numpy as np
 import sounddevice as sd
 import pyttsx3
+from scipy.signal import fftconvolve
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 
-# Configuration
+# -----------------------------
+# Config
+# -----------------------------
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR = os.path.join(SCRIPT_DIR, "Preprocessed")
-RATE = 16000
-DURATION = 3  # seconds
-SIMILARITY_THRESHOLD = 0.15
+CACHE_PATH = os.path.join(SCRIPT_DIR, "Preprocessed", "ref_cache.npz")
 
+RATE = 8000                 # must match dataset_processing.py cache rate
+DURATION = 3.0              # seconds to record
+SIMILARITY_THRESHOLD = 0.12 # tune per dataset (e.g., 0.12–0.20)
 
-def read_wav_as_float64(path: str, target_rate: int) -> np.ndarray:
-    with wave.open(path, "rb") as wf:
-        n_channels = wf.getnchannels()
-        framerate = wf.getframerate()
-        n_frames = wf.getnframes()
-        raw = wf.readframes(n_frames)
-    sig = np.frombuffer(raw, dtype=np.int16).astype(np.float64)
-    if n_channels > 1:
-        sig = sig[::n_channels]
-    if framerate != target_rate and sig.size > 0:
-        duration = n_frames / float(framerate)
-        old_time = np.linspace(0, duration, num=sig.size, endpoint=False)
-        new_time = np.linspace(0, duration, num=int(round(duration * target_rate)), endpoint=False)
-        sig = np.interp(new_time, old_time, sig)
-    return sig
+# -----------------------------
+# Utils
+# -----------------------------
+def trim_silence(x: np.ndarray, thr: float = 0.02, win: int = 1024) -> np.ndarray:
+    """Trim leading/trailing silence using RMS threshold."""
+    if x.size == 0:
+        return x
+    x = x.astype(np.float32, copy=False)
+    sq = x * x
+    kernel = np.ones(win, dtype=np.float32) / win
+    rms = np.sqrt(np.convolve(sq, kernel, mode="same") + 1e-8)
+    mask = rms > thr
+    if not np.any(mask):
+        return x
+    idx = np.where(mask)[0]
+    return x[idx[0]: idx[-1] + 1]
 
-
-def preprocess_signal(sig: np.ndarray, noise_gate: float = 0.02) -> np.ndarray:
+def preprocess_signal(sig: np.ndarray) -> np.ndarray:
+    """Zero-mean, peak-norm to 1, trim silence; keep float32."""
     if sig.size == 0:
         return sig
     sig = sig - np.mean(sig)
-    sig = sig / (np.max(np.abs(sig)) + 1e-12)
-    sig[np.abs(sig) < noise_gate] = 0.0
-    return sig
+    m = np.max(np.abs(sig)) + 1e-12
+    sig = (sig / m).astype(np.float32)
+    return trim_silence(sig, thr=0.02, win=1024)
 
-
-def znorm_xcorr_max(long_signal: np.ndarray, short_signal: np.ndarray) -> float:
-    L = len(short_signal)
-    if L == 0 or len(long_signal) < L:
+def ncc_fft_max(long_sig: np.ndarray, short_sig: np.ndarray) -> float:
+    """Max normalized cross-correlation using FFT convolution (fast)."""
+    L = len(short_sig)
+    if L == 0 or len(long_sig) < L:
         return 0.0
-    corr = np.correlate(long_signal, short_signal, mode="valid")
-    short_energy = np.sum(short_signal * short_signal)
-    if short_energy == 0:
+    corr = fftconvolve(long_sig, short_sig[::-1], mode="valid")
+    ss = np.sum(short_sig * short_sig, dtype=np.float64)
+    if ss <= 0.0:
         return 0.0
-    short_norm = np.sqrt(short_energy)
-    lsq = long_signal * long_signal
-    csum = np.cumsum(lsq)
+    short_norm = np.sqrt(ss)
+    lsq = long_sig * long_sig
+    csum = np.cumsum(lsq, dtype=np.float64)
     win_energy = csum[L-1:] - np.concatenate(([0.0], csum[:-L]))
     denom = short_norm * np.sqrt(np.maximum(win_energy, 1e-12))
     coeff = corr / denom
-    coeff = coeff[np.isfinite(coeff)]
     if coeff.size == 0:
         return 0.0
     return float(np.max(coeff))
 
-
-# --- Record audio using sounddevice ---
-print("Listening for an audio phrase...")
-recorded_samples = sd.rec(int(DURATION * RATE), samplerate=RATE, channels=1, dtype='float64')
-sd.wait()
-recorded_samples = recorded_samples.flatten()
-recorded_samples = preprocess_signal(recorded_samples)
-print("Finished Listening, started processing...")
-
-# --- Load and preprocess reference signals ---
-if not os.path.isdir(DATA_DIR):
-    raise FileNotFoundError(f"Reference directory not found: {DATA_DIR}")
-
-reference_signals = []
-for filename in os.listdir(DATA_DIR):
-    if filename.lower().endswith(".wav"):
-        try:
-            speaker, phrase_with_ext = filename.split(" - ", 1)
-            phrase = os.path.splitext(phrase_with_ext)[0]
-            # Strip trailing numbers (e.g., "Hello2" or "How are you 3" -> "Hello", "How are you")
-            phrase = re.sub(r'\s*\d+\s*$', '', phrase).strip()
-        except ValueError:
-            print(f"Skipping bad filename: {filename}")
-            continue
-        filepath = os.path.join(DATA_DIR, filename)
-        samples = read_wav_as_float64(filepath, target_rate=RATE)
-        samples = preprocess_signal(samples)
-        # keep filename so we can report which file matched best
-        reference_signals.append((speaker, phrase, samples, filename))
-
-if not reference_signals:
-    print("No reference WAV files found. Please preprocess your dataset.")
-    raise SystemExit(1)
-
-# --- Match recorded audio to reference samples ---
-best_match = None                 # (speaker, phrase, filename)
-best_score = -1.0
-corr_start = time.perf_counter()  # timing start
-
-for speaker, phrase, ref_signal, ref_filename in reference_signals:
-    if len(recorded_samples) >= len(ref_signal):
-        long_sig, short_sig = recorded_samples, ref_signal
+def score_one(args) -> float:
+    """Score pair (rec, ref) → max NCC."""
+    rec, ref = args
+    if len(rec) >= len(ref):
+        long_sig, short_sig = rec, ref
     else:
-        long_sig, short_sig = ref_signal, recorded_samples
-    score = znorm_xcorr_max(long_sig, short_sig)
-    if score > best_score:
-        best_score = score
-        best_match = (speaker, phrase, ref_filename)
+        long_sig, short_sig = ref, rec
+    return ncc_fft_max(long_sig, short_sig)
 
-corr_elapsed = time.perf_counter() - corr_start  # timing end
+def load_cache(path: str):
+    """Load preprocessed reference cache produced by dataset_processing.py."""
+    if not os.path.isfile(path):
+        raise FileNotFoundError(
+            f"Cache not found: {path}\nRun: python dataset_processing.py\n"
+            "This generates Preprocessed/ref_cache.npz"
+        )
+    z = np.load(path, allow_pickle=True)
+    data = {
+        "speakers": z["speakers"],
+        "phrases": z["phrases"],
+        "filenames": z["filenames"],
+        "signals": z["signals"],
+        "rate": int(z["rate"]),
+    }
+    return data
 
-# --- Respond based on result ---
-if best_match is not None and best_score >= SIMILARITY_THRESHOLD:
-    identified_speaker, identified_phrase, matched_filename = best_match
-    phrase_key = identified_phrase.strip().lower()
+def normalize_phrase(phrase_raw: str) -> str:
+    """Strip any trailing digits (e.g., 'Hello2' -> 'Hello')."""
+    return re.sub(r"\s*\d+\s*$", "", str(phrase_raw)).strip()
+
+def build_response(speaker: str | None, phrase_raw: str | None) -> str:
+    """Map phrase→reply; default echo if unknown."""
+    if not speaker or not phrase_raw:
+        return "Sorry, I didn't catch that."
+    phrase_key = normalize_phrase(phrase_raw).lower()
     if phrase_key == "hello":
-        response_text = f"Hey! {identified_speaker}"
-    elif phrase_key == "how are you":
-        response_text = f"I am fine thank you, {identified_speaker}!"
+        return f"Hey! {speaker}"
+    if phrase_key == "how are you":
+        return f"I am fine thank you, {speaker}!"
+    return f"You said: {normalize_phrase(phrase_raw)}, {speaker}."
+
+# -----------------------------
+# Main
+# -----------------------------
+def main():
+    ref = load_cache(CACHE_PATH)
+    if ref["rate"] != RATE:
+        raise RuntimeError(f"Cache rate {ref['rate']} != recorder rate {RATE}. Re-run dataset_processing.py.")
+
+    print("Listening for an audio phrase...")
+    rec = sd.rec(int(DURATION * RATE), samplerate=RATE, channels=1, dtype="float32")
+    sd.wait()
+    rec = preprocess_signal(rec.flatten())
+    print("Finished Listening, started processing...")
+
+    t0 = time.perf_counter()
+    scores: list[float] = []
+    try:
+        with ProcessPoolExecutor(max_workers=os.cpu_count() or 4) as ex:
+            scores = list(ex.map(score_one, ((rec, s) for s in ref["signals"]), chunksize=8))
+    except RuntimeError:
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            scores = list(ex.map(score_one, ((rec, s) for s in ref["signals"])))
+
+    best_idx = int(np.argmax(scores)) if scores else -1
+    best_score = scores[best_idx] if best_idx >= 0 else -1.0
+    elapsed = time.perf_counter() - t0
+
+    if best_idx >= 0 and best_score >= SIMILARITY_THRESHOLD:
+        spk = str(ref["speakers"][best_idx])
+        phr_raw = str(ref["phrases"][best_idx])
+        phr = normalize_phrase(phr_raw)
+        fname = str(ref["filenames"][best_idx])
+        response = build_response(spk, phr)
     else:
-        response_text = f"You said: {identified_phrase}, {identified_speaker}."
-else:
-    identified_speaker = identified_phrase = matched_filename = None
-    response_text = "Sorry, I didn't catch that."
+        spk = phr = fname = None
+        response = "Sorry, I didn't catch that."
 
-print("Response:", response_text)
-print(f"Max correlation coefficient: {best_score:.3f}")
-if matched_filename:
-    print(f"Best match file: {matched_filename}")
-print(f"Total correlation time: {corr_elapsed:.2f} s")
+    print("Response:", response)
+    print(f"Max correlation coefficient: {best_score:.3f}")
+    if best_idx >= 0:
+        print(f"Best match file: {fname}")
+        print(f"Recognized phrase (normalized): {phr}")
+    print(f"Total correlation time: {elapsed:.2f} s")
 
-# --- Speak the response ---
-engine = pyttsx3.init()
-engine.say(response_text)
-engine.runAndWait()
-# update: 2025-10-30T12:45:19.9133810+02:00
+    engine = pyttsx3.init()
+    engine.say(response)
+    engine.runAndWait()
+
+# -----------------------------
+# Windows-safe entry point
+# -----------------------------
+if __name__ == "__main__":
+    if sys.platform.startswith("win"):
+        import multiprocessing as mp
+        mp.freeze_support()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\nInterrupted.")
