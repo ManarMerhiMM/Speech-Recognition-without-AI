@@ -25,7 +25,7 @@ It compares a live-recorded voice clip with preprocessed audio samples and respo
 - 🕒 Displays **total correlation time** and best match file name  
 - 🗣️ Responds with **text-to-speech** based on the identified phrase
 - ⚠️ A threshold is set for identification in case no phrase/speaker matched the live recording  
-
+- 🖥️ In the GUI, both the recorded `.wav` file and the recognized `.wav` file are playable
 
 
 ---
@@ -60,6 +60,8 @@ Speech-Recognition-without-AI/
 
 ├── script.py # Main recognition logic
 
+├── gui.py # Simple user interface
+
 └── README.md # This file
 
 
@@ -75,7 +77,7 @@ Speech-Recognition-without-AI/
 Install dependencies using:
 
 ```bash
-pip install numpy sounddevice pyttsx3
+pip install numpy sounddevice pyttsx3 scipy pillow
 ```
 
 
@@ -138,10 +140,22 @@ This cleans all `.wav` files and saves them to the `Preprocessed/` directory.
 
 Once preprocessing is done:
 
+### Either run:
+
 ```bash
 python script.py
 ```
 
+#### For the terminal application
+
+
+### Or run:
+
+```bash
+python gui.py
+```
+
+#### for the same logic implemented through a simple interface
 
 You’ll see output like this:
 
@@ -177,52 +191,39 @@ The system will also **respond out loud**.
 - Saves cleaned signals for faster matching
 
 
-## 🖥️ Graphical User Interface (GUI)
+### 🖥️ Graphical User Interface (GUI)
 
 The project features a Tkinter-based GUI that allows users to record speech, compare it with stored samples, and view results interactively.
 
-### 🎙 Record
+#### 🎙 Record
 
 Click “Record” to capture audio using your microphone.
 
 The app displays progress messages like “Recording started…” and “Finished correlation (1.5 s)”.
 
-### 💬 Output of the User
+#### 💬 Output of the User
 
 Shows the current status of recording and processing in real time.
 
-### 🤖 Answer
+#### 🤖 Answer
 
 Displays:
 
 Best Match: the detected speaker and phrase.
 
-Reply: a short text response based on the recognized phrase.
+Reply: a short text (and TTS) response based on the recognized phrase.
 
-### 🎧 Playback
+#### 🎧 Playback
 
 Best Match → Play: plays the closest-matching dataset sample.
 
 Recorded Signal → Play: replays your recorded voice for comparison.
 
-### 🎨 Design
+#### 🎨 Design
 
 Clean dark theme built with Tkinter + ttk.
 
 Lightweight, responsive, and easy to run on any system.
-
-
-
-### ⚡ Matching
-
-- Computes **maximum normalized cross-correlation** between the recorded signal and each reference sample.  
-- Tracks:
-
-&nbsp; - The speaker \& phrase with the highest match
-
-&nbsp; - The correlation coefficient
-
-&nbsp; - The total processing time
 
 
 
@@ -239,7 +240,7 @@ Lightweight, responsive, and easy to run on any system.
 ---
 
 ### ☕ Adding More Responses
-To Add more Responses, simply add more `elif` statements to this part of the code `(lines 117-122)`:
+To Add more Responses, simply add more `elif` statements to this part of the code `script.py (lines 117-122)`:
 ```python
 if phrase_key == "hello":
     response_text = f"Hey! {identified_speaker}"
