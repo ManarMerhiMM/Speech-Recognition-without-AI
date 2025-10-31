@@ -1,27 +1,23 @@
-# gui.py — Tkinter GUI with REAL best-match search
-# - Records audio
-# - Correlates against WAVs in DATASET_DIR
-# - Shows Best Match (person, file, correlation) and can play both audios
-# Theme colors are in THEME section.
-
 import tkinter as tk
 from tkinter import ttk, messagebox
 import threading
-import datetime
 import os, glob, time, warnings
 
 import numpy as np
 import sounddevice as sd
 import scipy.io.wavfile as wav
 import scipy.signal as sps
+import pyttsx3  # text-to-speech
 
 # -------------------------------------------------------------------
 # SETTINGS
 # -------------------------------------------------------------------
 FS_RECORD = 44100          # microphone sample rate
 RECORD_SECONDS = 3         # seconds
-DATASET_DIR = "Data/Data"  # folder that contains your .wav files
+DATASET_DIR = "Data/"      # folder that contains your .wav files
 WORK_FS = 16000            # processing sample rate (downsample for speed)
+RECORD_FILE = "record_latest.wav"  # single file reused each recording
+SIMILARITY_THRESHOLD = 0.15
 
 # -------------------------------------------------------------------
 # STATE
@@ -29,6 +25,20 @@ WORK_FS = 16000            # processing sample rate (downsample for speed)
 recorded_data = None
 recorded_path = None
 best_match_path = None
+
+# TTS engine (initialized once)
+_tts_engine = pyttsx3.init()
+
+def speak_async(text: str):
+    """Speak text in a background thread so the UI remains responsive."""
+    def _run():
+        try:
+            _tts_engine.stop()
+            _tts_engine.say(text)
+            _tts_engine.runAndWait()
+        except Exception as e:
+            print("TTS error:", e)
+    threading.Thread(target=_run, daemon=True).start()
 
 # -------------------------------------------------------------------
 # AUDIO UTILS
@@ -40,7 +50,6 @@ def _to_mono_float(x):
         x = x[:, 0]
     # convert to float32 if int
     if np.issubdtype(x.dtype, np.integer):
-        # assume 16-bit like many WAVs
         x = x.astype(np.float32) / np.iinfo(x.dtype).max
     else:
         x = x.astype(np.float32)
@@ -50,7 +59,6 @@ def _resample(sig, fs_from, fs_to):
     """Resample using polyphase for quality & speed."""
     if fs_from == fs_to:
         return sig
-    # Reduce length but keep quality
     g = np.gcd(int(fs_from), int(fs_to))
     up = fs_to // g
     down = fs_from // g
@@ -58,10 +66,10 @@ def _resample(sig, fs_from, fs_to):
         warnings.simplefilter("ignore")
         return sps.resample_poly(sig, up, down).astype(np.float32)
 
-def _safe_play(wave, fs):
+def _safe_play(wave_, fs):
     try:
         sd.stop()
-        sd.play(wave, fs)
+        sd.play(wave_, fs)
     except Exception as e:
         messagebox.showerror("Audio Error", str(e))
 
@@ -78,34 +86,42 @@ def _load_wav(path, target_fs=None):
 # MATCHING LOGIC
 # -------------------------------------------------------------------
 def normalized_xcorr(a, b):
-    """
-    Max normalized cross-correlation between a and b.
-    Returns (max_corr_value).
-    """
+    """Max normalized cross-correlation between a and b."""
     if len(a) == 0 or len(b) == 0:
         return 0.0
-    # zero-mean
     a = a - np.mean(a)
     b = b - np.mean(b)
-    # norms
     na = np.linalg.norm(a)
     nb = np.linalg.norm(b)
     if na == 0 or nb == 0:
         return 0.0
-    # use FFT convolution for speed
     corr = sps.fftconvolve(a, b[::-1], mode="valid")  # slide b over a
     denom = na * nb
     corr = corr / denom
     return float(np.max(corr))
+
+def trim_silence(x, thr=0.02, win=2048):
+    """Simple silence trimming by magnitude threshold."""
+    if len(x) == 0:
+        return x
+    x = np.asarray(x, dtype=np.float32)
+    eps = 1e-8
+    sq = x**2
+    kernel = np.ones(win) / win
+    rms = np.sqrt(np.convolve(sq, kernel, mode="same") + eps)
+    mask = rms > thr
+    if not np.any(mask):
+        return x
+    idx = np.where(mask)[0]
+    start, end = int(idx[0]), int(idx[-1]) + 1
+    return x[start:end]
 
 def find_best_match(record_path):
     """
     Compare the recorded wav with every .wav in DATASET_DIR.
     Returns (best_path, best_score, person, file_name).
     """
-    # load recorded, resample to WORK_FS
     _, rec = _load_wav(record_path, target_fs=WORK_FS)
-    # optional: trim silence (quick energy gate)
     rec = trim_silence(rec)
 
     best_score, best_path = -1.0, None
@@ -113,7 +129,6 @@ def find_best_match(record_path):
         try:
             _, ref = _load_wav(path, target_fs=WORK_FS)
             ref = trim_silence(ref)
-            # make sure "a" (the longer) is first for valid mode
             a, b = (rec, ref) if len(rec) >= len(ref) else (ref, rec)
             score = normalized_xcorr(a, b)
             if score > best_score:
@@ -124,31 +139,10 @@ def find_best_match(record_path):
 
     person = "Unknown"
     file_name = os.path.basename(best_path) if best_path else "—"
-    # Try to extract person's name from "Name - Phrase.wav"
     if " - " in file_name:
         person = file_name.split(" - ")[0]
 
     return best_path, best_score, person, file_name
-
-def trim_silence(x, thr=0.02, win=2048):
-    """
-    Simple silence trimming by magnitude threshold.
-    thr in [0..1] relative amplitude.
-    """
-    if len(x) == 0:
-        return x
-    x = np.asarray(x, dtype=np.float32)
-    # compute envelope via moving RMS
-    eps = 1e-8
-    sq = x**2
-    kernel = np.ones(win) / win
-    rms = np.sqrt(np.convolve(sq, kernel, mode="same") + eps)
-    mask = rms > thr
-    if not np.any(mask):
-        return x  # nothing above threshold; return as-is
-    idx = np.where(mask)[0]
-    start, end = int(idx[0]), int(idx[-1]) + 1
-    return x[start:end]
 
 # -------------------------------------------------------------------
 # BUTTON ACTIONS
@@ -167,28 +161,41 @@ def _record_flow():
         recorded_data = audio.squeeze()
 
         status_var.set("Finished recording.")
-        fname = f"record_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.wav"
-        recorded_path = os.path.abspath(fname)
+        recorded_path = os.path.abspath(RECORD_FILE)  # overwrite one file every time
         wav.write(recorded_path, FS_RECORD, recorded_data.astype(np.float32))
 
         status_var.set("Started correlation...")
         t0 = time.time()
         best_match_path, best_score, person, fname = find_best_match(recorded_path)
         dt = time.time() - t0
-        status_var.set(f"Finished correlation ({dt:.1f} s)")
+        status_var.set(f"Finished correlation ({dt:.2f} s)")  # 2 decimals like script.py
 
-        if best_match_path is None:
+        reply_text = ""
+        if best_match_path is None or best_score < SIMILARITY_THRESHOLD:
             best_match_var.set("Best Match: (none found)")
-            reply_var.set("Reply: —")
         else:
             best_match_var.set(f"Best Match: {person} – {fname} | corr = {best_score:.2f}")
-            # Example reply logic; adjust to your project
-            if "How are you" in fname:
-                reply_var.set("Reply: I'm fine, thank you!")
-            elif "Hello" in fname:
-                reply_var.set("Reply: Hello! 👋")
+
+            # -------- phrase-key reply logic (case-insensitive) --------
+            phrase_key = os.path.splitext(fname)[0].split(" - ")[-1].strip().lower()
+            identified_speaker = person
+            identified_phrase = phrase_key
+
+            if phrase_key == "hello":
+                response_text = f"Hey! {identified_speaker}"
+            elif phrase_key == "how are you":
+                response_text = f"I am fine thank you, {identified_speaker}!"
             else:
-                reply_var.set("Reply: (matched phrase)")
+                response_text = f"{identified_phrase}, {identified_speaker}."
+            reply_text = response_text
+            # -----------------------------------------------------------
+
+        # Update UI
+        reply_var.set(f"Reply: {reply_text}" if reply_text else "Reply: —")
+
+        # Speak every time results appear (i.e., when we have a reply)
+        if reply_text:
+            speak_async(reply_text)
 
     except Exception as e:
         messagebox.showerror("Recording Error", str(e))
